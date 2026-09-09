@@ -1,0 +1,440 @@
+/* ═══════════════════════════════════════════════════════════════════
+   style.css
+   Real-Time Multimedia Communication and Video Conferencing System
+   Member 3 — QoS and Frontend
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Reset & Base ───────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  background-color: #1a1a1a;
+  color: #e0e0e0;
+  font-size: 14px;
+  min-height: 100vh;
+}
+
+/* ── Home Page ──────────────────────────────────────────────────────── */
+.home-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+.home-card {
+  background-color: #242424;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 36px 40px;
+  width: 360px;
+}
+
+.home-card h1 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #ffffff;
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
+.home-card .subtitle {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 28px;
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 13px;
+  color: #aaa;
+  margin-bottom: 6px;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 9px 12px;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 14px;
+  outline: none;
+}
+
+.form-group input:focus {
+  border-color: #4a90e2;
+}
+
+.btn-join {
+  width: 100%;
+  padding: 10px;
+  margin-top: 8px;
+  background-color: #4a90e2;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-join:hover {
+  background-color: #3a7bd5;
+}
+
+.btn-join:disabled {
+  background-color: #555;
+  cursor: not-allowed;
+}
+
+.error-msg {
+  background-color: #5c2020;
+  border: 1px solid #8b3030;
+  border-radius: 4px;
+  color: #ffaaaa;
+  padding: 8px 12px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+/* ── Room Page Layout ───────────────────────────────────────────────── */
+.room-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Header */
+.room-header {
+  background-color: #242424;
+  border-bottom: 1px solid #333;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.room-header .room-info h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.room-header .room-info .status {
+  font-size: 12px;
+  color: #4caf50;
+}
+
+.room-header .room-info .status.connecting {
+  color: #ffb74d;
+}
+
+/* Main content area */
+.room-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Left: video area */
+.video-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 12px;
+  gap: 12px;
+}
+
+/* Right: side panels */
+.side-panels {
+  width: 280px;
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #333;
+  overflow: hidden;
+}
+
+/* ── Controls Bar ───────────────────────────────────────────────────── */
+.controls-bar {
+  background-color: #242424;
+  border-top: 1px solid #333;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.btn-control {
+  padding: 8px 16px;
+  border: 1px solid #555;
+  border-radius: 4px;
+  background-color: #333;
+  color: #e0e0e0;
+  font-size: 13px;
+  cursor: pointer;
+  min-width: 120px;
+}
+
+.btn-control:hover {
+  background-color: #444;
+}
+
+.btn-control.off {
+  border-color: #8b3030;
+  background-color: #3d1f1f;
+  color: #ff9090;
+}
+
+.btn-leave {
+  margin-left: auto;
+  padding: 8px 20px;
+  background-color: #c0392b;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-leave:hover {
+  background-color: #a93226;
+}
+
+/* ── Video Grid ─────────────────────────────────────────────────────── */
+.video-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex: 1;
+  align-content: flex-start;
+}
+
+.video-tile {
+  position: relative;
+  background-color: #000;
+  border: 1px solid #444;
+  border-radius: 6px;
+  overflow: hidden;
+  width: calc(50% - 5px);
+  aspect-ratio: 16/9;
+}
+
+/* When only 1 tile, make it bigger */
+.video-grid.single-tile .video-tile {
+  width: 100%;
+  max-height: 100%;
+}
+
+.video-tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.video-tile .participant-name {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  background-color: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+
+.video-tile .local-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background-color: rgba(74, 144, 226, 0.8);
+  color: #fff;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+/* ── Chat Panel ─────────────────────────────────────────────────────── */
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  border-bottom: 1px solid #333;
+  overflow: hidden;
+}
+
+.panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #aaa;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 10px 12px;
+  background-color: #1e1e1e;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-message {
+  background-color: #2a2a2a;
+  border-radius: 4px;
+  padding: 6px 10px;
+}
+
+.chat-message .msg-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: #4a90e2;
+  margin-bottom: 2px;
+}
+
+.chat-message .msg-text {
+  font-size: 13px;
+  color: #ddd;
+  word-break: break-word;
+}
+
+.chat-message.own-message .msg-name {
+  color: #67b86a;
+}
+
+.chat-input-row {
+  display: flex;
+  border-top: 1px solid #333;
+  padding: 8px;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.chat-input-row input {
+  flex: 1;
+  padding: 6px 10px;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 13px;
+  outline: none;
+}
+
+.chat-input-row input:focus {
+  border-color: #4a90e2;
+}
+
+.chat-input-row button {
+  padding: 6px 14px;
+  background-color: #4a90e2;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chat-input-row button:hover {
+  background-color: #3a7bd5;
+}
+
+/* ── QoS Panel ──────────────────────────────────────────────────────── */
+.qos-panel {
+  flex-shrink: 0;
+  padding: 10px 12px;
+  background-color: #1e1e1e;
+}
+
+.qos-panel .panel-title {
+  padding: 0;
+  margin-bottom: 10px;
+  background: none;
+  border: none;
+}
+
+.qos-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.qos-item {
+  background-color: #2a2a2a;
+  border: 1px solid #383838;
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+
+.qos-item .qos-label {
+  font-size: 10px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 3px;
+}
+
+.qos-item .qos-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: #e0e0e0;
+  font-variant-numeric: tabular-nums;
+}
+
+.qos-item .qos-unit {
+  font-size: 10px;
+  color: #777;
+  margin-left: 2px;
+}
+
+.connection-quality {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background-color: #2a2a2a;
+  border: 1px solid #383838;
+  border-radius: 4px;
+}
+
+.connection-quality .quality-label {
+  font-size: 11px;
+  color: #888;
+}
+
+.connection-quality .quality-value {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.connection-quality .quality-value.good { color: #4caf50; }
+.connection-quality .quality-value.average { color: #ffb74d; }
+.connection-quality .quality-value.poor { color: #ef5350; }
+.connection-quality .quality-value.waiting { color: #888; }
+
+/* ── Scrollbar ──────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #1a1a1a; }
+::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
