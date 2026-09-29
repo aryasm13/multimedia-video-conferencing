@@ -271,3 +271,10 @@ The backend binds to `0.0.0.0` and reads port from `process.env.PORT || 3000`.
 - Maximum 3 participants per room (mesh WebRTC)
 - TURN servers are not configured — may not work across certain NATs/firewalls (works fine on local network or with STUN reachability)
 - No persistent chat history
+
+---
+
+## Future Work
+
+- Live video captioning feature
+- Database integration to eport the caption and chat
