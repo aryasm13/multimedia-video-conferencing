@@ -7,17 +7,18 @@
  *   - HTTP server with Express
  *   - Socket.IO signaling (offer / answer / ICE candidates)
  *   - Room management (join / leave / user tracking)
- *   - Text chat relay
+ *   - Text chat and live caption relay with SQLite persistence
  *
  * NOTE: This server never carries audio/video.
  *       Audio/video travels peer-to-peer via WebRTC.
- *       This server only handles signaling (session negotiation) and chat.
+ *       This server handles signaling and text transcripts only.
  */
 
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const { getRoomMessages, saveMessage } = require('./database');
 
 // ─── App Setup ────────────────────────────────────────────────────────────────
 
@@ -33,6 +34,49 @@ const io = new Server(server, {
 
 app.use(cors());
 app.use(express.json());
+
+app.get('/api/rooms/:roomId/messages', (req, res) => {
+  try {
+    res.json({ messages: getRoomMessages(req.params.roomId) });
+  } catch (error) {
+    console.error('[DATABASE] Failed to load room messages:', error);
+    res.status(500).json({ error: 'Could not load room messages.' });
+  }
+});
+
+app.get('/api/rooms/:roomId/export', (req, res) => {
+  if (req.query.format && req.query.format !== 'csv') {
+    return res.status(400).json({ error: 'Unsupported export format. Use csv.' });
+  }
+
+  try {
+    const messages = getRoomMessages(req.params.roomId);
+    const escapeCsv = (value) => {
+      const text = String(value);
+      const safeText = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+      return `"${safeText.replace(/"/g, '""')}"`;
+    };
+    const rows = [
+      ['type', 'roomId', 'name', 'message', 'timestamp'],
+      ...messages.map((entry) => [
+        entry.type,
+        entry.roomId,
+        entry.name,
+        entry.message,
+        new Date(entry.timestamp).toISOString(),
+      ]),
+    ];
+    const csv = rows.map((row) => row.map(escapeCsv).join(',')).join('\r\n');
+
+    res
+      .type('text/csv')
+      .attachment('room-conversation.csv')
+      .send(csv);
+  } catch (error) {
+    console.error('[DATABASE] Failed to export room messages:', error);
+    res.status(500).json({ error: 'Could not export room messages.' });
+  }
+});
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 
@@ -123,17 +167,15 @@ io.on('connection', (socket) => {
   });
 
   // ── Chat ──────────────────────────────────────────────────────────────────
-  // Client sends: { roomId, name, message }
+  // Client sends: { roomId, message }; the name comes from the joined socket.
   // Server broadcasts to everyone in the room (including sender for consistency)
 
-  socket.on('chat-message', ({ roomId, name, message }) => {
-    if (!roomId || !name || !message) return;
-    console.log(`[CHAT] ${name}: ${message}`);
-    io.to(roomId).emit('chat-message', {
-      name,
-      message,
-      timestamp: Date.now(),
-    });
+  socket.on('chat-message', (payload, acknowledge) => {
+    persistRoomMessage(socket, payload, 'chat', acknowledge);
+  });
+
+  socket.on('caption-message', (payload, acknowledge) => {
+    persistRoomMessage(socket, payload, 'caption', acknowledge);
   });
 
   // ── leave-room ────────────────────────────────────────────────────────────
@@ -142,6 +184,34 @@ io.on('connection', (socket) => {
   socket.on('leave-room', ({ roomId }) => {
     handleLeave(socket, roomId);
   });
+
+  function persistRoomMessage(socket, payload, type, acknowledge) {
+    const roomId = payload?.roomId;
+    const message = typeof payload?.message === 'string' ? payload.message.trim() : '';
+
+    if (!roomId || roomId !== socket.data.roomId) {
+      acknowledge?.({ error: 'Join the room before sending messages.' });
+      return;
+    }
+    if (!message || message.length > 2000) {
+      acknowledge?.({ error: 'Messages must contain 1 to 2000 characters.' });
+      return;
+    }
+
+    try {
+      const entry = saveMessage({
+        roomId,
+        type,
+        name: socket.data.name,
+        message,
+      });
+      io.to(roomId).emit(type === 'chat' ? 'chat-message' : 'caption-message', entry);
+      acknowledge?.({ ok: true, id: entry.id });
+    } catch (error) {
+      console.error(`[DATABASE] Failed to save ${type} for room ${roomId}:`, error);
+      acknowledge?.({ error: 'Message could not be saved. Please try again.' });
+    }
+  }
 
   // ── disconnect ────────────────────────────────────────────────────────────
 

@@ -5,6 +5,9 @@ node_modules/
 dist/
 build/
 
+# Local conversation database
+server/data/
+
 # Environment files — NEVER commit real .env files
 .env
 .env.local

@@ -59,18 +59,24 @@ export default function QoSPanel({ peerConnectionsRef }) {
     fps: null,
   });
 
-  // Store previous bytes for bitrate calculation
+  // Keep byte counters per inbound stream because stats reports can include
+  // separate audio/video tracks whose counters start at different times.
   const prevBytesRef = useRef(null);
-  const prevTimeRef = useRef(null);
 
   useEffect(() => {
     const interval = setInterval(async () => {
       // Get the first available peer connection
       const pcs = [...(peerConnectionsRef?.current?.values() || [])];
-      if (pcs.length === 0) return;
+      if (pcs.length === 0) {
+        prevBytesRef.current = null;
+        return;
+      }
 
       const pc = pcs[0];
-      if (pc.connectionState !== 'connected') return;
+      if (pc.connectionState !== 'connected') {
+        prevBytesRef.current = null;
+        return;
+      }
 
       try {
         const statsReport = await pc.getStats();
@@ -80,6 +86,8 @@ export default function QoSPanel({ peerConnectionsRef }) {
         let packetLoss = null;    // %
         let bitrate = null;       // kbps
         let fps = null;           // frames/sec
+        const currentInboundBytes = new Map();
+        let sampleTimestamp = null;
 
         statsReport.forEach((report) => {
           // ── Inbound RTP: jitter, packet loss, bytes, FPS ──────────────────
@@ -100,19 +108,11 @@ export default function QoSPanel({ peerConnectionsRef }) {
               }
             }
 
-            // Bitrate calculation:
-            //   bitrate = (byteDifference × 8) / timeDifference
-            if (report.bytesReceived !== undefined) {
-              const now = Date.now();
-              if (prevBytesRef.current !== null && prevTimeRef.current !== null) {
-                const bytesDiff = report.bytesReceived - prevBytesRef.current;
-                const timeDiff = (now - prevTimeRef.current) / 1000; // seconds
-                if (timeDiff > 0) {
-                  bitrate = (bytesDiff * 8) / timeDiff / 1000; // kbps
-                }
+            if (typeof report.bytesReceived === 'number') {
+              currentInboundBytes.set(report.id, report.bytesReceived);
+              if (typeof report.timestamp === 'number') {
+                sampleTimestamp = Math.max(sampleTimestamp || 0, report.timestamp);
               }
-              prevBytesRef.current = report.bytesReceived;
-              prevTimeRef.current = Date.now();
             }
 
             // FPS (video only)
@@ -140,6 +140,26 @@ export default function QoSPanel({ peerConnectionsRef }) {
             }
           }
         });
+
+        const previousSample = prevBytesRef.current;
+        if (previousSample?.pc === pc && sampleTimestamp !== null) {
+          let bytesDiff = 0;
+          let hasComparableStream = false;
+          currentInboundBytes.forEach((bytesReceived, id) => {
+            const previousBytes = previousSample.bytesById.get(id);
+            if (previousBytes !== undefined && bytesReceived >= previousBytes) {
+              bytesDiff += bytesReceived - previousBytes;
+              hasComparableStream = true;
+            }
+          });
+          const timeDiff = (sampleTimestamp - previousSample.timestamp) / 1000;
+          if (hasComparableStream && timeDiff > 0) {
+            bitrate = (bytesDiff * 8) / timeDiff / 1000;
+          }
+        }
+        prevBytesRef.current = sampleTimestamp === null
+          ? null
+          : { pc, timestamp: sampleTimestamp, bytesById: currentInboundBytes };
 
         setStats({ latency, jitter, packetLoss, bitrate, fps });
       } catch (err) {

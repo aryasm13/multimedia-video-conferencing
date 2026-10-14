@@ -6,7 +6,7 @@ A Multimedia Systems course project demonstrating real-time audio/video communic
 
 ## Abstract
 
-This project implements a browser-based real-time multimedia communication system. Audio and video are transmitted directly between peers using the WebRTC protocol, which operates peer-to-peer without routing media through the server. A Node.js/Express/Socket.IO server handles signaling (session negotiation), room management, and text chat. Quality of Service metrics including latency, jitter, packet loss, bitrate, and video frame rate are collected from the browser's WebRTC statistics API (`RTCPeerConnection.getStats()`) and displayed in a live monitoring panel.
+This project implements a browser-based real-time multimedia communication system. Audio and video are transmitted directly between peers using the WebRTC protocol, which operates peer-to-peer without routing media through the server. A Node.js/Express/Socket.IO server handles signaling (session negotiation), room management, chat, live caption relay, and transcript persistence. Quality of Service metrics including latency, jitter, packet loss, bitrate, and video frame rate are collected from the browser's WebRTC statistics API (`RTCPeerConnection.getStats()`) and displayed in a live monitoring panel.
 
 ---
 
@@ -27,10 +27,12 @@ This project implements a browser-based real-time multimedia communication syste
 - Camera ON/OFF toggle (disables video track)
 - Microphone ON/OFF toggle (disables audio track)
 - Leave room (releases camera/mic, cleans up WebRTC connections)
-- Text chat within the room (Socket.IO, no database)
+- Text chat within the room, with messages persisted in SQLite
+- Opt-in live speech captions shared with room participants
+- Downloadable CSV export of room chat and captions
 - QoS panel showing live: latency, jitter, packet loss, bitrate, FPS
 - Connection quality indicator (Good / Average / Poor)
-- No authentication, no database
+- No authentication
 
 ---
 
@@ -41,9 +43,9 @@ This project implements a browser-based real-time multimedia communication syste
 | Frontend | React 18, Vite |
 | Styling | Plain CSS |
 | Backend | Node.js, Express |
-| Real-time | Socket.IO (signaling + chat) |
+| Real-time | Socket.IO (signaling, chat, captions) |
 | Media | WebRTC (getUserMedia, RTCPeerConnection, getStats) |
-| Database | None |
+| Database | SQLite (`better-sqlite3`) |
 
 ---
 
@@ -55,10 +57,11 @@ Browser A                        Browser B
    |    Socket.IO (signaling)         |
    +-----------> Server <------------+
                   |
-           Signaling only:
+           Server coordination:
            - room management
            - offer / answer / ICE
-           - chat relay
+           - chat/caption relay
+           - transcript persistence and export
 
 After signaling:
 
@@ -67,7 +70,7 @@ Browser A <=========WebRTC========> Browser B
            (peer-to-peer, no server)
 ```
 
-**The server never carries audio or video.** Media flows directly between browsers using WebRTC. The server only facilitates the initial session negotiation (signaling).
+**The server never carries or stores audio or video.** Media flows directly between browsers using WebRTC. The server handles signaling, relays text and final caption transcripts, and stores those transcripts in SQLite.
 
 ---
 
@@ -80,7 +83,7 @@ multimedia-video-conferencing/
 │   │   ├── components/
 │   │   │   ├── VideoGrid.jsx      ← local + remote video tiles
 │   │   │   ├── Controls.jsx       ← camera/mic toggle, leave
-│   │   │   ├── Chat.jsx           ← Socket.IO text chat
+│   │   │   ├── Chat.jsx           ← chat, live captions, transcript export
 │   │   │   └── QoSPanel.jsx       ← WebRTC getStats() display
 │   │   ├── App.jsx                ← routing, getUserMedia, WebRTC, signaling
 │   │   ├── main.jsx
@@ -88,7 +91,8 @@ multimedia-video-conferencing/
 │   ├── .env.example
 │   └── package.json
 ├── server/
-│   ├── server.js                  ← Express + Socket.IO
+│   ├── server.js                  ← Express + Socket.IO + transcript API
+│   ├── database.js                ← SQLite transcript storage
 │   └── package.json
 ├── .gitignore
 └── README.md
@@ -101,7 +105,7 @@ multimedia-video-conferencing/
 | Member | Area | Files |
 |---|---|---|
 | Member 1 | Audio/Video and WebRTC | `App.jsx` (getUserMedia, RTCPeerConnection, tracks), `VideoGrid.jsx`, camera/mic toggle |
-| Member 2 | Communication and Session Management | `server.js` (rooms, signaling, chat), Socket.IO events in `App.jsx`, `Chat.jsx` |
+| Member 2 | Communication and Session Management | `server.js` (rooms, signaling, chat/captions), `database.js`, `Chat.jsx` |
 | Member 3 | QoS and Frontend | `QoSPanel.jsx` (getStats, calculations, quality indicator), `style.css`, README |
 
 ---
@@ -112,6 +116,7 @@ multimedia-video-conferencing/
 
 - Node.js v18 or higher
 - npm
+- Chrome or Edge for live captions (Web Speech API support)
 
 ### 1. Start the Backend
 
@@ -137,6 +142,12 @@ npm run dev
 
 Frontend will run at: `http://localhost:5173`
 
+If joining reports a camera/microphone error, use `http://localhost:5173` or
+HTTPS, allow camera and microphone access for the site in your browser's address
+bar permissions, and close other apps that may be using the devices. On Windows,
+also check **Settings → Privacy & security → Camera/Microphone** and allow
+desktop apps to access them.
+
 ### 3. Configure Environment (optional)
 
 The default backend URL is `http://localhost:3000`.
@@ -148,6 +159,16 @@ cp client/.env.example client/.env
 ```
 
 Edit `VITE_SERVER_URL` if your server is on a different address.
+
+The server creates `server/data/conversations.sqlite` automatically. Set the
+server's `DB_PATH` environment variable to use a different persistent SQLite
+file, and make sure its parent directory is writable. Chat messages and final
+caption transcripts are stored by room; raw audio and video are never stored.
+Use **Start captions** in the room chat panel to opt in to browser speech
+recognition. Browsers that support on-device speech recognition use the local
+English speech pack when available; the browser may ask to download it first.
+Otherwise, speech recognition may require an internet connection. Use **Export
+CSV** to download that room's chat and caption history.
 
 ---
 
@@ -172,6 +193,9 @@ Edit `VITE_SERVER_URL` if your server is on a different address.
 - [ ] Camera OFF button disables local video (remote sees black)
 - [ ] Mic OFF button mutes audio
 - [ ] Chat messages appear in both windows
+- [ ] Starting captions displays interim speech and shares final captions with the room
+- [ ] Refreshing/rejoining the room restores saved chat and caption history
+- [ ] Export CSV downloads the room's chat and captions
 - [ ] QoS panel shows real values (latency, jitter, etc.) after ~2 seconds
 - [ ] Connection quality shows Good/Average/Poor
 - [ ] Leave Room returns to home page and releases camera/mic
@@ -208,7 +232,7 @@ WebRTC does not define how peers find each other — that is the application's j
 2. **Answer**: Peer B responds with an SDP answer
 3. **ICE Candidates**: Both peers exchange network address candidates until a working path is found
 
-After signaling completes, media flows **directly between peers** — the server is no longer involved.
+After signaling completes, media flows **directly between peers** — the server is not in the audio/video path. It continues to relay chat and caption text.
 
 ### Session Management
 
@@ -259,7 +283,7 @@ The project is designed for easy deployment:
 - **Backend**: Can be deployed to any Node.js host (Render, Railway, etc.) using `process.env.PORT`
 - **Frontend**: Built with Vite, deployable as a static site to Netlify, Vercel, etc.
 - **Configuration**: Set `VITE_SERVER_URL` in the frontend environment to point to the deployed backend
-- **No database, no filesystem storage, no machine-specific paths**
+- **SQLite transcript storage**: configure a durable writable `DB_PATH` when deploying
 
 The backend binds to `0.0.0.0` and reads port from `process.env.PORT || 3000`.
 
@@ -270,11 +294,13 @@ The backend binds to `0.0.0.0` and reads port from `process.env.PORT || 3000`.
 - Rooms are stored in server memory — they reset if the server restarts
 - Maximum 3 participants per room (mesh WebRTC)
 - TURN servers are not configured — may not work across certain NATs/firewalls (works fine on local network or with STUN reachability)
-- No persistent chat history
+- Browser speech recognition availability varies; Chrome/Edge are recommended
+- Transcript history persists in SQLite and should be backed up with the configured database file
 
----
+## Transcript API
 
-## Future Work
-
-- Live video captioning feature
-- Database integration to eport the caption and chat
+- `GET /api/rooms/:roomId/messages` returns the persisted chat and caption
+  transcript as JSON.
+- `GET /api/rooms/:roomId/export?format=csv` downloads the same transcript as
+  CSV. The `format` parameter may be omitted; unsupported formats return HTTP
+  400.

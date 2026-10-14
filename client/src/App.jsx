@@ -146,19 +146,36 @@ export default function App() {
     // ── Step 1: Get camera and microphone (getUserMedia) ─────────────────────
     // This is the entry point for all media in the system.
     let stream;
+    if (!window.isSecureContext) {
+      setJoinError('Camera and microphone access requires HTTPS or localhost. Open this app at http://localhost:5173 or use HTTPS.');
+      setJoining(false);
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setJoinError('This browser does not support camera or microphone access. Try the latest version of Chrome or Edge.');
+      setJoining(false);
+      return;
+    }
+
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
     } catch (err) {
-      let msg = 'Could not access camera/microphone.';
-      if (err.name === 'NotFoundError') {
-        msg = 'No camera or microphone found.';
-      } else if (err.name === 'NotAllowedError') {
-        msg = 'Camera/microphone permission denied. Please allow access.';
-      }
-      setJoinError(msg);
+      const errorName = err?.name || '';
+      const errorMessages = {
+        NotAllowedError: 'Camera/microphone permission was blocked. Allow access for this site using the lock/tune icon beside the address bar, then reload.',
+        NotFoundError: 'No camera or microphone was found. Connect a device and check that Windows can see it.',
+        NotReadableError: 'The camera or microphone is busy or unavailable. Close other apps using it, then try again.',
+        OverconstrainedError: 'The camera or microphone could not satisfy the requested settings. Check your device and browser settings.',
+        SecurityError: 'The browser blocked camera/microphone access. Use HTTPS or localhost and check site permissions.',
+        AbortError: 'The camera or microphone could not start. Check that the device is connected, then try again.',
+      };
+      const message = errorMessages[errorName] ||
+        `Could not access camera/microphone${errorName ? ` (${errorName})` : ''}. Check browser and Windows privacy permissions, then try again.`;
+      console.error('[Media] getUserMedia failed:', err);
+      setJoinError(message);
       setJoining(false);
       return;
     }
@@ -429,7 +446,13 @@ export default function App() {
 
         {/* Side panels: Chat + QoS */}
         <div className="side-panels">
-          <Chat socketRef={socketRef} roomId={roomId} myName={myName} />
+          <Chat
+            socketRef={socketRef}
+            roomId={roomId}
+            myName={myName}
+            serverUrl={SERVER_URL}
+            micEnabled={micEnabled}
+          />
           <QoSPanel peerConnectionsRef={peerConnectionsRef} />
         </div>
       </div>
