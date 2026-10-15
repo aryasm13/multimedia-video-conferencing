@@ -35,14 +35,30 @@ import QoSPanel from './components/QoSPanel.jsx';
 // ─── ICE Server Configuration ─────────────────────────────────────────────────
 // Using Google's public STUN servers.
 // STUN helps peers discover their public IP addresses for WebRTC.
+// TURN is optional (set VITE_TURN_* in client/.env): a relay server for networks
+// where no direct peer-to-peer path exists (symmetric NAT, strict firewalls).
+const TURN_URLS = (import.meta.env.VITE_TURN_URL || '')
+  .split(',')
+  .map((url) => url.trim())
+  .filter(Boolean);
+
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    ...(TURN_URLS.length > 0
+      ? [{
+          urls: TURN_URLS,
+          username: import.meta.env.VITE_TURN_USERNAME,
+          credential: import.meta.env.VITE_TURN_CREDENTIAL,
+        }]
+      : []),
   ],
 };
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3000';
+// Backend URL. Empty = same origin: the Vite dev server proxies /socket.io and
+// /api to the backend (see vite.config.js), which is what LAN mode relies on.
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || '';
 
 export default function App() {
   // ── Page state ──────────────────────────────────────────────────────────────
@@ -58,6 +74,8 @@ export default function App() {
   const [myName, setMyName] = useState('');
   const [roomId, setRoomId] = useState('');
   const [roomStatus, setRoomStatus] = useState('Connecting...');
+  // false while the Socket.IO link to the server is down (media keeps flowing P2P)
+  const [signalingConnected, setSignalingConnected] = useState(true);
 
   // ── Media state ──────────────────────────────────────────────────────────────
   const [localStream, setLocalStream] = useState(null);
@@ -76,13 +94,43 @@ export default function App() {
   // localStream ref (so event handlers always see latest value)
   const localStreamRef = useRef(null);
 
+  // true once the server has admitted us to the room (socket handlers are
+  // closures, so they read this ref instead of the `page` state)
+  const inRoomRef = useRef(false);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HELPER: Summarise every peer connection's state into the header status
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const updateRoomStatus = useCallback(() => {
+    const states = [...peerConnectionsRef.current.values()].map((pc) => pc.connectionState);
+    if (states.length === 0) setRoomStatus('Waiting for others...');
+    else if (states.includes('failed')) setRoomStatus('Connection failed (network may need a TURN server)');
+    else if (states.includes('disconnected')) setRoomStatus('Connection interrupted...');
+    else if (states.every((state) => state === 'connected')) setRoomStatus('Connected');
+    else setRoomStatus('Connecting...');
+  }, []);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HELPER: Close every peer connection and remove the remote video tiles
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const closeAllPeers = useCallback(() => {
+    peerConnectionsRef.current.forEach((pc) => pc.close());
+    peerConnectionsRef.current.clear();
+    setRemoteStreams(new Map());
+  }, []);
+
   // ═══════════════════════════════════════════════════════════════════════════
   // HELPER: Create RTCPeerConnection for a peer
   // Member 1 responsibility
   // ═══════════════════════════════════════════════════════════════════════════
 
   const createPeerConnection = useCallback((targetSocketId, targetName) => {
-    // Create a new peer connection using STUN servers
+    // Never keep two connections to the same peer
+    peerConnectionsRef.current.get(targetSocketId)?.close();
+
+    // Create a new peer connection using STUN (and TURN, if configured)
     const pc = new RTCPeerConnection(ICE_SERVERS);
 
     // ── Add local tracks to the peer connection ──────────────────────────────
@@ -115,17 +163,18 @@ export default function App() {
       });
     };
 
-    // ── Connection state logging ─────────────────────────────────────────────
+    // ── Connection state → header status ─────────────────────────────────────
+    // new → connecting → connected, or → disconnected / failed on network trouble
     pc.onconnectionstatechange = () => {
       console.log(`[WebRTC] ${targetName} connection state: ${pc.connectionState}`);
-      if (pc.connectionState === 'connected') {
-        setRoomStatus('Connected');
+      if (peerConnectionsRef.current.get(targetSocketId) === pc) {
+        updateRoomStatus();
       }
     };
 
     peerConnectionsRef.current.set(targetSocketId, pc);
     return pc;
-  }, []);
+  }, [updateRoomStatus]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // JOIN ROOM
@@ -134,6 +183,10 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════════════════════
 
   const joinRoom = async () => {
+    // The Enter key bypasses the disabled button, so guard against a second
+    // join while the first is still in progress (it would join twice)
+    if (joining) return;
+
     const name = nameInput.trim();
     const room = roomInput.trim();
 
@@ -186,28 +239,67 @@ export default function App() {
     setMicEnabled(true);
 
     // ── Step 2: Connect to Socket.IO server ──────────────────────────────────
-    const socket = io(SERVER_URL, { transports: ['websocket', 'polling'] });
+    // (undefined URL = connect to the page's own origin)
+    const socket = io(SERVER_URL || undefined, { transports: ['websocket', 'polling'] });
     socketRef.current = socket;
+
+    // Give up on this join attempt: release the camera/mic AND stop Socket.IO's
+    // automatic reconnection — otherwise the socket keeps retrying in the
+    // background and later joins the room as a "ghost" participant.
+    const abortJoin = (message) => {
+      socket.disconnect();
+      stream.getTracks().forEach((t) => t.stop());
+      if (socketRef.current === socket) socketRef.current = null;
+      if (localStreamRef.current === stream) localStreamRef.current = null;
+      setLocalStream(null);
+      setJoinError(message);
+      setJoining(false);
+    };
+
+    // The server refused us: abort the join, or leave if we were already inside
+    const failJoin = (message) => {
+      if (inRoomRef.current) {
+        leaveRoom();
+        setJoinError(message);
+      } else {
+        abortJoin(message);
+      }
+    };
 
     // ── Step 3: Set up signaling event listeners ──────────────────────────────
     // (Member 2 — session management)
 
     socket.on('connect', () => {
       console.log('[Socket] Connected:', socket.id);
+      setSignalingConnected(true);
+      if (inRoomRef.current) {
+        // Reconnected after a server restart or network drop. The server gave
+        // us a new socket id, so rebuild the mesh: close the old peer
+        // connections and rejoin as a newcomer (we send fresh offers).
+        closeAllPeers();
+      }
       // Join the room after socket is connected
       socket.emit('join-room', { roomId: room, name });
     });
 
+    // Fires on the first failed attempt AND on every failed reconnect attempt
     socket.on('connect_error', () => {
-      setJoinError('Cannot connect to server. Is the backend running?');
-      setJoining(false);
-      stream.getTracks().forEach((t) => t.stop());
+      if (inRoomRef.current) return; // in a call: keep media alive while retrying
+      abortJoin('Cannot connect to server. Is the backend running?');
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.log('[Socket] Disconnected:', reason);
+      // Audio/video keep flowing peer-to-peer; only signaling and chat are down.
+      // Socket.IO reconnects automatically (see the 'connect' handler above).
+      if (inRoomRef.current) setSignalingConnected(false);
     });
 
     // Server sends us the list of users already in the room
     // We must initiate WebRTC offers to each of them
     socket.on('room-users', async ({ users }) => {
       console.log('[Socket] Existing users in room:', users);
+      inRoomRef.current = true;
       setMyName(name);
       setRoomId(room);
       setPage('room');
@@ -222,7 +314,7 @@ export default function App() {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        socket.emit('offer', { to: user.socketId, offer, name });
+        socket.emit('offer', { to: user.socketId, offer });
       }
     });
 
@@ -280,17 +372,12 @@ export default function App() {
         return updated;
       });
 
-      // Update status if no peers remain
-      if (peerConnectionsRef.current.size === 0) {
-        setRoomStatus('Waiting for others...');
-      }
+      // Recompute status from the remaining peers ('Waiting for others...' if none)
+      updateRoomStatus();
     });
 
     socket.on('room-full', ({ roomId: fullRoom }) => {
-      setJoinError(`Room "${fullRoom}" is full (max 3 participants).`);
-      setJoining(false);
-      stream.getTracks().forEach((t) => t.stop());
-      socket.disconnect();
+      failJoin(`Room "${fullRoom}" is full (max 3 participants).`);
     });
   };
 
@@ -300,9 +387,11 @@ export default function App() {
   // ═══════════════════════════════════════════════════════════════════════════
 
   const leaveRoom = useCallback(() => {
-    // 1. Close all peer connections
-    peerConnectionsRef.current.forEach((pc) => pc.close());
-    peerConnectionsRef.current.clear();
+    // 0. Mark as left first, so socket handlers ignore the coming disconnect
+    inRoomRef.current = false;
+
+    // 1. Close all peer connections (and remove remote tiles)
+    closeAllPeers();
 
     // 2. Stop all local media tracks (releases camera/mic)
     if (localStreamRef.current) {
@@ -318,12 +407,12 @@ export default function App() {
 
     // 4. Reset state
     setLocalStream(null);
-    setRemoteStreams(new Map());
     setMyName('');
     setRoomId('');
     setRoomStatus('Connecting...');
+    setSignalingConnected(true);
     setPage('home');
-  }, []);
+  }, [closeAllPeers]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // CAMERA TOGGLE
@@ -383,6 +472,7 @@ export default function App() {
               id="name-input"
               type="text"
               placeholder="Enter your name"
+              maxLength={64}
               value={nameInput}
               onChange={(e) => setNameInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && joinRoom()}
@@ -395,6 +485,7 @@ export default function App() {
               id="room-input"
               type="text"
               placeholder="e.g. multimedia101"
+              maxLength={64}
               value={roomInput}
               onChange={(e) => setRoomInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && joinRoom()}
@@ -417,14 +508,16 @@ export default function App() {
   }
 
   // Room page
+  const statusText = signalingConnected ? roomStatus : 'Reconnecting to server...';
+
   return (
     <div className="room-page">
       {/* Header */}
       <div className="room-header">
         <div className="room-info">
           <h2>Room: {roomId}</h2>
-          <div className={`status ${roomStatus !== 'Connected' ? 'connecting' : ''}`}>
-            ● {roomStatus}
+          <div className={`status ${statusText !== 'Connected' ? 'connecting' : ''}`}>
+            ● {statusText}
           </div>
         </div>
         <div style={{ fontSize: '13px', color: '#888' }}>
@@ -453,7 +546,7 @@ export default function App() {
             serverUrl={SERVER_URL}
             micEnabled={micEnabled}
           />
-          <QoSPanel peerConnectionsRef={peerConnectionsRef} />
+          <QoSPanel peerConnectionsRef={peerConnectionsRef} remoteStreams={remoteStreams} />
         </div>
       </div>
 

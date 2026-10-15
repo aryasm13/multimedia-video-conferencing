@@ -11,14 +11,22 @@
  *
  * We use getStats() to read REAL values — no fake/random data.
  *
- * Metrics collected:
- *   - Latency     → remote-inbound-rtp.roundTripTime (RTT from RTCP)
- *   - Jitter      → inbound-rtp.jitter (from RTCP receiver reports)
- *   - Packet Loss → inbound-rtp.packetsLost / total packets received
- *   - Bitrate     → calculated from bytesReceived difference over time
- *   - FPS         → inbound-rtp.framesPerSecond
+ * Stats are shown for one peer: the first peer connection that is currently
+ * 'connected' (its name is shown in the panel title).
  *
- * Connection quality:
+ * Metrics collected:
+ *   - Latency     → round-trip time (RTT): remote-inbound-rtp.roundTripTime,
+ *                   computed from RTCP Sender/Receiver Reports; falls back to the
+ *                   active ICE candidate pair's currentRoundTripTime (STUN checks)
+ *   - Jitter      → inbound-rtp.jitter of the AUDIO stream (RFC 3550
+ *                   inter-arrival jitter, measured by our RTP receiver)
+ *   - Packet Loss → packets lost / packets expected across all incoming
+ *                   audio+video RTP, over the last ~5 seconds (like the
+ *                   "fraction lost" field of an RTCP Receiver Report)
+ *   - Bitrate     → calculated from bytesReceived difference over time
+ *   - FPS         → inbound-rtp.framesPerSecond of the VIDEO stream
+ *
+ * Connection quality (a metric that is not available yet is ignored):
  *   Good    → latency < 150ms AND jitter < 30ms AND loss < 1%
  *   Average → latency < 300ms AND jitter < 60ms AND loss < 5%
  *   Poor    → anything worse
@@ -27,6 +35,16 @@
 import { useState, useEffect, useRef } from 'react';
 
 const POLL_INTERVAL_MS = 1000;
+const LOSS_WINDOW_SAMPLES = 5; // packet loss is measured over the last 5 polls
+
+const EMPTY_STATS = {
+  peerId: null,
+  latency: null,
+  jitter: null,
+  packetLoss: null,
+  bitrate: null,
+  fps: null,
+};
 
 // Format a number to 1 decimal place, or return 'N/A'
 function fmt(val, decimals = 1) {
@@ -41,72 +59,63 @@ function getQuality(latency, jitter, packetLoss) {
     return 'waiting';
   }
 
-  const lat = latency ?? 9999;
-  const jit = jitter ?? 9999;
-  const loss = packetLoss ?? 100;
+  // A metric we could not measure yet does not count against the connection
+  const below = (value, limit) => value === null || value < limit;
 
-  if (lat < 150 && jit < 30 && loss < 1) return 'good';
-  if (lat < 300 && jit < 60 && loss < 5) return 'average';
+  if (below(latency, 150) && below(jitter, 30) && below(packetLoss, 1)) return 'good';
+  if (below(latency, 300) && below(jitter, 60) && below(packetLoss, 5)) return 'average';
   return 'poor';
 }
 
-export default function QoSPanel({ peerConnectionsRef }) {
-  const [stats, setStats] = useState({
-    latency: null,
-    jitter: null,
-    packetLoss: null,
-    bitrate: null,
-    fps: null,
-  });
+export default function QoSPanel({ peerConnectionsRef, remoteStreams }) {
+  const [stats, setStats] = useState(EMPTY_STATS);
 
-  // Keep byte counters per inbound stream because stats reports can include
-  // separate audio/video tracks whose counters start at different times.
-  const prevBytesRef = useRef(null);
+  // Previous sample of the monitored connection:
+  //   bytesById   → byte counters per inbound stream (audio/video counters
+  //                 start at different times), for the bitrate
+  //   lossSamples → recent cumulative lost/received totals, for windowed loss
+  const prevSampleRef = useRef(null);
 
   useEffect(() => {
     const interval = setInterval(async () => {
-      // Get the first available peer connection
-      const pcs = [...(peerConnectionsRef?.current?.values() || [])];
-      if (pcs.length === 0) {
-        prevBytesRef.current = null;
+      // Monitor the first peer connection that is actually connected
+      const entry = [...(peerConnectionsRef?.current?.entries() || [])]
+        .find(([, pc]) => pc.connectionState === 'connected');
+      if (!entry) {
+        // No live connection: clear the panel instead of freezing old numbers
+        prevSampleRef.current = null;
+        setStats(EMPTY_STATS);
         return;
       }
-
-      const pc = pcs[0];
-      if (pc.connectionState !== 'connected') {
-        prevBytesRef.current = null;
-        return;
-      }
+      const [peerId, pc] = entry;
 
       try {
         const statsReport = await pc.getStats();
 
-        let latency = null;       // ms
-        let jitter = null;        // ms
-        let packetLoss = null;    // %
+        let rtcpRtt = null;       // ms, from RTCP reports
+        let iceRtt = null;        // ms, from ICE/STUN connectivity checks
+        let audioJitter = null;   // ms
+        let videoJitter = null;   // ms
         let bitrate = null;       // kbps
         let fps = null;           // frames/sec
+        let packetsLost = 0;      // cumulative, all inbound streams
+        let packetsReceived = 0;  // cumulative, all inbound streams
         const currentInboundBytes = new Map();
         let sampleTimestamp = null;
 
         statsReport.forEach((report) => {
-          // ── Inbound RTP: jitter, packet loss, bytes, FPS ──────────────────
+          // ── Inbound RTP: jitter, packet counters, bytes, FPS ──────────────
           if (report.type === 'inbound-rtp') {
-            // Jitter is in seconds — convert to ms
+            // Jitter is in seconds — convert to ms (audio and video separately)
             if (report.jitter !== undefined) {
-              jitter = report.jitter * 1000;
+              if (report.kind === 'audio') audioJitter = report.jitter * 1000;
+              else videoJitter = report.jitter * 1000;
             }
 
-            // Packet loss percentage
-            if (
-              report.packetsLost !== undefined &&
-              report.packetsReceived !== undefined
-            ) {
-              const total = report.packetsLost + report.packetsReceived;
-              if (total > 0) {
-                packetLoss = (report.packetsLost / total) * 100;
-              }
-            }
+            // Cumulative packet counters (packetsLost can briefly go negative
+            // when duplicate packets arrive, so clamp it)
+            packetsLost += Math.max(0, report.packetsLost || 0);
+            packetsReceived += report.packetsReceived || 0;
 
             if (typeof report.bytesReceived === 'number') {
               currentInboundBytes.set(report.id, report.bytesReceived);
@@ -116,33 +125,33 @@ export default function QoSPanel({ peerConnectionsRef }) {
             }
 
             // FPS (video only)
-            if (report.framesPerSecond !== undefined) {
+            if (report.kind === 'video' && report.framesPerSecond !== undefined) {
               fps = report.framesPerSecond;
             }
           }
 
           // ── Remote Inbound RTP: RTT (latency) ─────────────────────────────
-          // This comes from RTCP sender reports — the browser computes RTT
-          if (report.type === 'remote-inbound-rtp') {
-            if (report.roundTripTime !== undefined) {
-              latency = report.roundTripTime * 1000; // seconds → ms
-            }
+          // The browser computes RTT when the peer's RTCP Receiver Report
+          // echoes the timestamp of our last RTCP Sender Report
+          if (report.type === 'remote-inbound-rtp' && report.roundTripTime !== undefined) {
+            rtcpRtt = report.roundTripTime * 1000; // seconds → ms
           }
 
-          // ── Candidate pair: fallback latency ──────────────────────────────
+          // ── Active candidate pair: fallback RTT from STUN checks ──────────
           if (
             report.type === 'candidate-pair' &&
             report.state === 'succeeded' &&
-            latency === null
+            report.nominated &&
+            report.currentRoundTripTime !== undefined
           ) {
-            if (report.currentRoundTripTime !== undefined) {
-              latency = report.currentRoundTripTime * 1000;
-            }
+            iceRtt = report.currentRoundTripTime * 1000;
           }
         });
 
-        const previousSample = prevBytesRef.current;
-        if (previousSample?.pc === pc && sampleTimestamp !== null) {
+        const previousSample = prevSampleRef.current?.pc === pc ? prevSampleRef.current : null;
+
+        // ── Bitrate: bytes received since the previous poll ──────────────────
+        if (previousSample && sampleTimestamp !== null) {
           let bytesDiff = 0;
           let hasComparableStream = false;
           currentInboundBytes.forEach((bytesReceived, id) => {
@@ -157,11 +166,30 @@ export default function QoSPanel({ peerConnectionsRef }) {
             bitrate = (bytesDiff * 8) / timeDiff / 1000;
           }
         }
-        prevBytesRef.current = sampleTimestamp === null
-          ? null
-          : { pc, timestamp: sampleTimestamp, bytesById: currentInboundBytes };
 
-        setStats({ latency, jitter, packetLoss, bitrate, fps });
+        // ── Packet loss over the recent window (not since the call began) ────
+        const lossSamples = [
+          ...(previousSample?.lossSamples || []),
+          { packetsLost, packetsReceived },
+        ].slice(-(LOSS_WINDOW_SAMPLES + 1));
+        const oldest = lossSamples[0];
+        const lostInWindow = Math.max(0, packetsLost - oldest.packetsLost);
+        const receivedInWindow = Math.max(0, packetsReceived - oldest.packetsReceived);
+        const expectedInWindow = lostInWindow + receivedInWindow;
+        const packetLoss = expectedInWindow > 0 ? (lostInWindow / expectedInWindow) * 100 : null;
+
+        prevSampleRef.current = sampleTimestamp === null
+          ? null
+          : { pc, timestamp: sampleTimestamp, bytesById: currentInboundBytes, lossSamples };
+
+        setStats({
+          peerId,
+          latency: rtcpRtt ?? iceRtt,
+          jitter: audioJitter ?? videoJitter,
+          packetLoss,
+          bitrate,
+          fps,
+        });
       } catch (err) {
         // getStats() can throw if connection closed
         console.warn('[QoS] getStats error:', err);
@@ -172,6 +200,7 @@ export default function QoSPanel({ peerConnectionsRef }) {
   }, [peerConnectionsRef]);
 
   const quality = getQuality(stats.latency, stats.jitter, stats.packetLoss);
+  const peerName = stats.peerId ? remoteStreams?.get(stats.peerId)?.name : null;
 
   // Format bitrate nicely: show Mbps if >= 1000 kbps
   const bitrateDisplay = () => {
@@ -185,7 +214,9 @@ export default function QoSPanel({ peerConnectionsRef }) {
 
   return (
     <div className="qos-panel">
-      <div className="panel-title">Quality of Service</div>
+      <div className="panel-title">
+        Quality of Service{peerName ? ` · ${peerName}` : ''}
+      </div>
 
       <div className="qos-grid">
         <div className="qos-item">

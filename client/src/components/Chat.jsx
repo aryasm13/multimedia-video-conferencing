@@ -55,9 +55,13 @@ export default function Chat({ socketRef, roomId, myName, serverUrl, micEnabled 
     };
 
     loadMessages();
+    // After a reconnect, fetch again to pick up messages sent while we were
+    // offline (duplicates are merged by message id)
+    socket.on('connect', loadMessages);
     return () => {
       socket.off('chat-message', handleMessage);
       socket.off('caption-message', handleMessage);
+      socket.off('connect', loadMessages);
       controller.abort();
     };
   }, [roomId, serverUrl, socketRef]);
@@ -78,8 +82,11 @@ export default function Chat({ socketRef, roomId, myName, serverUrl, micEnabled 
     if (!micEnabled) stopCaptioning();
   }, [micEnabled, stopCaptioning]);
 
+  // On leaving the room: clear the ref first so onend does not restart it
   useEffect(() => () => {
-    if (recognitionRef.current) recognitionRef.current.stop();
+    const recognition = recognitionRef.current;
+    recognitionRef.current = null;
+    if (recognition) recognition.stop();
   }, []);
 
   const toggleCaptioning = async () => {
@@ -148,6 +155,7 @@ export default function Chat({ socketRef, roomId, myName, serverUrl, micEnabled 
     recognition.continuous = true;
     recognition.interimResults = true;
     if (processLocally) recognition.processLocally = true;
+    let stoppedByError = false;
     recognition.onresult = (event) => {
       let finalTranscript = '';
       let interim = '';
@@ -166,6 +174,9 @@ export default function Chat({ socketRef, roomId, myName, serverUrl, micEnabled 
       }
     };
     recognition.onerror = (event) => {
+      // 'no-speech' only means silence and 'aborted' follows stop(): not failures
+      if (event.error === 'no-speech' || event.error === 'aborted') return;
+      stoppedByError = true;
       const messages = {
         network: processLocally
           ? 'On-device speech recognition failed. Check the installed English speech pack, then restart captions.'
@@ -178,6 +189,16 @@ export default function Chat({ socketRef, roomId, myName, serverUrl, micEnabled 
       setError(messages[event.error] || `Live captioning stopped: ${event.error}.`);
     };
     recognition.onend = () => {
+      // The browser ends recognition sessions on its own (after silence or a
+      // time limit). Restart unless the user stopped captions or an error occurred.
+      if (recognitionRef.current === recognition && !stoppedByError) {
+        try {
+          recognition.start();
+          return;
+        } catch (restartError) {
+          console.warn('[Captions] Could not restart speech recognition:', restartError);
+        }
+      }
       if (recognitionRef.current === recognition) recognitionRef.current = null;
       setCaptioning(false);
       setInterimTranscript('');
