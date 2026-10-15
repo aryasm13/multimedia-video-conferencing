@@ -25,14 +25,20 @@ const { getRoomMessages, saveMessage } = require('./database');
 const app = express();
 const server = http.createServer(app);
 
+// Allowed frontend origin(s), e.g. CLIENT_ORIGIN=https://your-app.vercel.app
+// (comma-separated for several). Unset = allow any origin (local development).
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN
+  ? process.env.CLIENT_ORIGIN.split(',').map((origin) => origin.trim())
+  : '*';
+
 const io = new Server(server, {
   cors: {
-    origin: '*',          // In production, restrict this to your frontend domain
+    origin: CLIENT_ORIGIN,
     methods: ['GET', 'POST'],
   },
 });
 
-app.use(cors());
+app.use(cors({ origin: CLIENT_ORIGIN }));
 app.use(express.json());
 
 app.get('/api/rooms/:roomId/messages', (req, res) => {
@@ -84,9 +90,10 @@ app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     message: 'MMS Video Conferencing Server is running',
-    rooms: Object.fromEntries(
-      [...rooms.entries()].map(([id, users]) => [id, users.map((u) => u.name)])
-    ),
+    // Counts only: room IDs are not listed publicly, because anyone who knows
+    // a room ID can read its transcript through the API above.
+    activeRooms: rooms.size,
+    participants: [...rooms.values()].reduce((total, users) => total + users.length, 0),
   });
 });
 
@@ -95,6 +102,14 @@ app.get('/', (req, res) => {
 
 const rooms = new Map();
 const MAX_ROOM_SIZE = 3;
+const MAX_FIELD_LENGTH = 64; // max characters for a room ID or a name
+
+// Returns the trimmed string, or '' if it is not a string of a sensible length
+function cleanText(value) {
+  if (typeof value !== 'string') return '';
+  const text = value.trim();
+  return text.length <= MAX_FIELD_LENGTH ? text : '';
+}
 
 // ─── Socket.IO Events ─────────────────────────────────────────────────────────
 
@@ -108,9 +123,19 @@ io.on('connection', (socket) => {
   //   2. Adds user to room
   //   3. Sends existing users list to the new joiner
   //   4. Notifies existing users about the new joiner
+  //
+  // Every handler reads its payload defensively (payload?.field): destructuring
+  // a missing payload would throw and crash the whole server for everyone.
 
-  socket.on('join-room', ({ roomId, name }) => {
+  socket.on('join-room', (payload) => {
+    const roomId = cleanText(payload?.roomId);
+    const name = cleanText(payload?.name);
     if (!roomId || !name) return;
+
+    // A socket can be in only one room at a time
+    if (socket.data.roomId) {
+      handleLeave(socket, socket.data.roomId);
+    }
 
     // Get or create room
     if (!rooms.has(roomId)) {
@@ -142,28 +167,39 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('user-joined', { socketId: socket.id, name });
   });
 
+  // ── WebRTC Signaling: relay helper ─────────────────────────────────────────
+  // Forwards a signaling message only to a peer in the sender's own room, so a
+  // client cannot send offers to sockets in other rooms (or to a whole room).
+
+  function relayToPeer(event, to, data) {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || !room.some((u) => u.socketId === to)) return;
+    io.to(to).emit(event, { from: socket.id, ...data });
+  }
+
   // ── WebRTC Signaling: Offer ────────────────────────────────────────────────
   // Relay offer from one peer to another
-  // Client sends: { to: targetSocketId, offer: RTCSessionDescriptionInit, name }
+  // Client sends: { to: targetSocketId, offer: RTCSessionDescriptionInit }
+  // The caller's name is taken from the server-side session, not the payload.
 
-  socket.on('offer', ({ to, offer, name }) => {
-    console.log(`[OFFER] ${socket.id} → ${to}`);
-    io.to(to).emit('offer', { from: socket.id, offer, name });
+  socket.on('offer', (payload) => {
+    console.log(`[OFFER] ${socket.id} → ${payload?.to}`);
+    relayToPeer('offer', payload?.to, { offer: payload?.offer, name: socket.data.name });
   });
 
   // ── WebRTC Signaling: Answer ───────────────────────────────────────────────
   // Client sends: { to: targetSocketId, answer: RTCSessionDescriptionInit }
 
-  socket.on('answer', ({ to, answer }) => {
-    console.log(`[ANSWER] ${socket.id} → ${to}`);
-    io.to(to).emit('answer', { from: socket.id, answer });
+  socket.on('answer', (payload) => {
+    console.log(`[ANSWER] ${socket.id} → ${payload?.to}`);
+    relayToPeer('answer', payload?.to, { answer: payload?.answer });
   });
 
   // ── WebRTC Signaling: ICE Candidate ───────────────────────────────────────
   // Client sends: { to: targetSocketId, candidate: RTCIceCandidateInit }
 
-  socket.on('ice-candidate', ({ to, candidate }) => {
-    io.to(to).emit('ice-candidate', { from: socket.id, candidate });
+  socket.on('ice-candidate', (payload) => {
+    relayToPeer('ice-candidate', payload?.to, { candidate: payload?.candidate });
   });
 
   // ── Chat ──────────────────────────────────────────────────────────────────
@@ -179,10 +215,13 @@ io.on('connection', (socket) => {
   });
 
   // ── leave-room ────────────────────────────────────────────────────────────
-  // Client sends: { roomId }
+  // Client sends: nothing needed — the server already knows the socket's room.
+  // (The React client simply disconnects, which triggers the same cleanup.)
 
-  socket.on('leave-room', ({ roomId }) => {
-    handleLeave(socket, roomId);
+  socket.on('leave-room', () => {
+    if (socket.data.roomId) {
+      handleLeave(socket, socket.data.roomId);
+    }
   });
 
   function persistRoomMessage(socket, payload, type, acknowledge) {
@@ -241,6 +280,7 @@ function handleLeave(socket, roomId) {
   }
 
   socket.leave(roomId);
+  socket.data.roomId = null; // no more chat/signaling for this room
 
   // Notify remaining users
   socket.to(roomId).emit('user-left', { socketId: socket.id, name });
