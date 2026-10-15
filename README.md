@@ -32,6 +32,9 @@ This project implements a browser-based real-time multimedia communication syste
 - Downloadable CSV export of room chat and captions
 - QoS panel showing live: latency, jitter, packet loss, bitrate, FPS
 - Connection quality indicator (Good / Average / Poor)
+- Calls survive a signaling-server restart: media keeps flowing peer-to-peer and the room is rejoined automatically
+- LAN mode (`npm run dev:lan`) for testing across phones and laptops on the same Wi-Fi
+- Optional TURN relay configuration for restrictive networks
 - No authentication
 
 ---
@@ -89,6 +92,8 @@ multimedia-video-conferencing/
 │   │   ├── main.jsx
 │   │   └── style.css
 │   ├── .env.example
+│   ├── .env.lan                   ← settings for LAN mode (npm run dev:lan)
+│   ├── vite.config.js             ← dev server, backend proxy, LAN HTTPS
 │   └── package.json
 ├── server/
 │   ├── server.js                  ← Express + Socket.IO + transcript API
@@ -150,7 +155,8 @@ desktop apps to access them.
 
 ### 3. Configure Environment (optional)
 
-The default backend URL is `http://localhost:3000`.
+By default the frontend talks to the backend through the Vite dev server's
+proxy (`/socket.io` and `/api` are forwarded to `http://localhost:3000`).
 
 To change it, create `client/.env` from the example:
 
@@ -158,7 +164,16 @@ To change it, create `client/.env` from the example:
 cp client/.env.example client/.env
 ```
 
-Edit `VITE_SERVER_URL` if your server is on a different address.
+| Variable (client/.env) | Purpose |
+|---|---|
+| `VITE_SERVER_URL` | Backend URL. Leave empty locally (uses the proxy); set it to the deployed backend for production builds |
+| `VITE_TURN_URL`, `VITE_TURN_USERNAME`, `VITE_TURN_CREDENTIAL` | Optional TURN relay for networks that block direct peer-to-peer connections |
+
+| Variable (server) | Purpose |
+|---|---|
+| `PORT` | Port to listen on (default `3000`) |
+| `DB_PATH` | SQLite file location (default `server/data/conversations.sqlite`) |
+| `CLIENT_ORIGIN` | Allowed frontend origin(s) for CORS, comma-separated (default: any origin) |
 
 The server creates `server/data/conversations.sqlite` automatically. Set the
 server's `DB_PATH` environment variable to use a different persistent SQLite
@@ -169,6 +184,25 @@ recognition. Browsers that support on-device speech recognition use the local
 English speech pack when available; the browser may ask to download it first.
 Otherwise, speech recognition may require an internet connection. Use **Export
 CSV** to download that room's chat and caption history.
+
+### 4. Testing on Multiple Devices (same Wi-Fi)
+
+Browsers only allow camera/microphone on HTTPS or `localhost`, so opening
+`http://<laptop-ip>:5173` from a phone fails. LAN mode serves the app over
+HTTPS (self-signed certificate) and proxies the backend through the same origin:
+
+```bash
+cd server && npm start          # terminal 1
+cd client && npm run dev:lan    # terminal 2
+```
+
+1. Vite prints one or more `Network: https://<ip>:5173` URLs. Use the IP of the
+   laptop's **Wi-Fi** adapter (`ipconfig` → "Wireless LAN adapter Wi-Fi").
+2. On each device, open that URL and accept the certificate warning
+   (Advanced → Proceed).
+3. If Windows Firewall asks, allow Node.js on the network.
+4. Campus/office Wi-Fi often blocks device-to-device traffic. If devices cannot
+   connect, use a mobile hotspot for all devices.
 
 ---
 
@@ -199,6 +233,8 @@ CSV** to download that room's chat and caption history.
 - [ ] QoS panel shows real values (latency, jitter, etc.) after ~2 seconds
 - [ ] Connection quality shows Good/Average/Poor
 - [ ] Leave Room returns to home page and releases camera/mic
+- [ ] Stopping the backend mid-call: video continues and the header shows "Reconnecting to server..."; restarting it restores "Connected"
+- [ ] A phone on the same Wi-Fi can join using LAN mode
 
 ---
 
@@ -236,7 +272,7 @@ After signaling completes, media flows **directly between peers** — the server
 
 ### Session Management
 
-The server maintains rooms in memory. When a user joins, existing users are notified and initiate WebRTC offers. When a user leaves, remaining users clean up their peer connections.
+The server maintains rooms in memory. When a user joins, the server sends the newcomer the list of existing users, and the newcomer sends a WebRTC offer to each of them; existing users are notified and answer those offers. When a user leaves, remaining users clean up their peer connections. If the signaling connection drops, Socket.IO reconnects automatically and the client rejoins the room, rebuilding its peer connections.
 
 ### QoS (Quality of Service)
 
@@ -244,11 +280,13 @@ QoS measures network quality and its impact on the user experience. We collect t
 
 | Metric | Description | Source |
 |---|---|---|
-| Latency | Round-trip time between peers | `remote-inbound-rtp.roundTripTime` |
-| Jitter | Variation in packet arrival times | `inbound-rtp.jitter` |
-| Packet Loss | % of packets that did not arrive | `inbound-rtp.packetsLost` / total |
+| Latency | Round-trip time between peers | `remote-inbound-rtp.roundTripTime` (RTCP), else the active ICE candidate pair's `currentRoundTripTime` |
+| Jitter | Variation in packet arrival times (audio stream) | `inbound-rtp.jitter` (`kind: audio`) |
+| Packet Loss | % of packets that did not arrive, over the last ~5 s | Δ `packetsLost` / Δ(`packetsLost` + `packetsReceived`), audio + video |
 | Bitrate | Data rate of received media | Δ `bytesReceived` × 8 / Δt |
-| FPS | Video frames rendered per second | `inbound-rtp.framesPerSecond` |
+| FPS | Video frames decoded per second | `inbound-rtp.framesPerSecond` (`kind: video`) |
+
+The panel monitors the first connected peer; its name is shown in the panel title.
 
 ### Latency
 
@@ -282,8 +320,9 @@ The project is designed for easy deployment:
 
 - **Backend**: Can be deployed to any Node.js host (Render, Railway, etc.) using `process.env.PORT`
 - **Frontend**: Built with Vite, deployable as a static site to Netlify, Vercel, etc.
-- **Configuration**: Set `VITE_SERVER_URL` in the frontend environment to point to the deployed backend
-- **SQLite transcript storage**: configure a durable writable `DB_PATH` when deploying
+- **Configuration**: Set `VITE_SERVER_URL` in the frontend's build environment to point to the deployed backend (Vite embeds it at build time), and set `CLIENT_ORIGIN` on the backend to the frontend's URL
+- **SQLite transcript storage**: configure a durable writable `DB_PATH` when deploying (free hosting tiers often have an ephemeral disk that is wiped on restart)
+- **TURN**: for participants on mobile data or strict networks, set the `VITE_TURN_*` variables
 
 The backend binds to `0.0.0.0` and reads port from `process.env.PORT || 3000`.
 
@@ -291,9 +330,11 @@ The backend binds to `0.0.0.0` and reads port from `process.env.PORT || 3000`.
 
 ## Known Limitations
 
-- Rooms are stored in server memory — they reset if the server restarts
+- Rooms are stored in server memory — they reset if the server restarts (clients rejoin automatically when it comes back)
 - Maximum 3 participants per room (mesh WebRTC)
-- TURN servers are not configured — may not work across certain NATs/firewalls (works fine on local network or with STUN reachability)
+- No TURN server is bundled — without `VITE_TURN_*` configured, calls may fail across symmetric NATs/strict firewalls (works fine on a local network or with STUN reachability)
+- The QoS panel shows one peer at a time (the first connected peer)
+- Anyone who knows a room ID can join it and read its transcript (no authentication)
 - Browser speech recognition availability varies; Chrome/Edge are recommended
 - Transcript history persists in SQLite and should be backed up with the configured database file
 
